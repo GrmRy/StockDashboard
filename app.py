@@ -1,110 +1,110 @@
 import streamlit as st
-import plotly.graph_objects as go
-import pandas as pd
 import yfinance as yf
+import pandas as pd
 import numpy as np
+import plotly.graph_objects as go
 from sklearn.preprocessing import MinMaxScaler
 from tensorflow.keras.models import load_model
+from tensorflow.keras.losses import MeanSquaredError
 
-# Load your pre-trained LSTM model
-model = load_model("your_model.h5")  # Replace with your model file name
+model = load_model("stock_prediction_model.h5", custom_objects={'mse': MeanSquaredError()})
 
-# Define a function to fetch historical stock data from Yahoo Finance
+
+# --- Helper Functions ---
 @st.cache_data
-def get_stock_data(ticker, period="5y"):
+def fetch_stock_data(ticker, period="5y"):
     data = yf.download(ticker, period=period)
     return data
 
-# Define a function to prepare data using MinMaxScaler
-def prepare_data(df, sequence_length=60):
+def prepare_scaler_and_data(df, window=60):
     scaler = MinMaxScaler(feature_range=(0, 1))
     scaled_data = scaler.fit_transform(df[['Close']])
     return scaled_data, scaler
 
-# Define a function to forecast future stock prices using the pre-trained model
-def forecast_stock(scaled_data, model, scaler, forecast_days=30, sequence_length=60):
-    # Get the last sequence_length days from the scaled data
-    last_sequence = scaled_data[-sequence_length:]
-    forecast_input = last_sequence.reshape((1, sequence_length, 1))
+def forecast_prices(scaled_data, model, scaler, forecast_days=30, window=60):
+    last_window = scaled_data[-window:]
+    forecast_input = last_window.reshape((1, window, 1))
     
     forecast = []
     for _ in range(forecast_days):
-        # Predict the next day price
-        next_price = model.predict(forecast_input)[0, 0]
-        forecast.append(next_price)
-        # Update the input sequence by appending the predicted value and dropping the first value
+        pred = model.predict(forecast_input)[0, 0]
+        forecast.append(pred)
         forecast_input = np.roll(forecast_input, -1, axis=1)
-        forecast_input[0, -1, 0] = next_price
+        forecast_input[0, -1, 0] = pred
         
-    # Inverse transform the forecast back to the original scale
     forecast = scaler.inverse_transform(np.array(forecast).reshape(-1, 1))
     return forecast
 
-# Begin Streamlit dashboard layout
-st.title("Stock Data and Forecast Dashboard")
-st.markdown("This dashboard displays historical stock data along with a 30‑day forecast using a pre-trained LSTM model.")
+# --- Streamlit App Layout ---
+st.set_page_config(page_title="Stock Forecast Dashboard", layout="wide")
+st.title("📈 Stock Data & Forecast Dashboard")
 
-# Sidebar for user inputs
-st.sidebar.header("User Input Options")
+# Sidebar
+st.sidebar.header("Settings")
 ticker = st.sidebar.text_input("Enter Stock Ticker", value="AAPL")
 period = st.sidebar.selectbox("Select Data Period", options=["1y", "3y", "5y", "10y"], index=2)
+forecast_trigger = st.sidebar.button("Generate 30-Day Forecast")
 
+# Main Panel
 if ticker:
-    # Fetch the stock data
-    data = get_stock_data(ticker, period)
+    # Fetch Data
+    data = fetch_stock_data(ticker, period)
     
-    st.subheader(f"{ticker} Historical Data")
-    st.dataframe(data.tail())
+    # Layout: Split main area into two columns
+    col1, col2 = st.columns(2)
     
-    # Display a candlestick chart of the historical data
-    st.subheader("Candlestick Chart")
-    fig = go.Figure(data=[
-        go.Candlestick(
+    with col1:
+        st.subheader(f"{ticker} Historical Data")
+        st.dataframe(data.tail())
+        
+        # Display Candlestick Chart
+        st.subheader("Candlestick Chart")
+        fig = go.Figure(data=[go.Candlestick(
             x=data.index,
             open=data['Open'],
             high=data['High'],
             low=data['Low'],
             close=data['Close'],
-            name='Candlestick'
-        )
-    ])
-    fig.update_layout(title=f"{ticker} Candlestick Chart")
-    st.plotly_chart(fig, use_container_width=True)
+            increasing_line_color='green',
+            decreasing_line_color='red'
+        )])
+        fig.update_layout(title=f"{ticker} Candlestick Chart", xaxis_title="Date", yaxis_title="Price (USD)")
+        st.plotly_chart(fig, use_container_width=True)
     
-    # Display some basic stock information using yfinance info
-    st.subheader("Stock Information")
-    ticker_info = yf.Ticker(ticker).info
-    info_data = {
-        "Previous Close": ticker_info.get("previousClose", "N/A"),
-        "Open": ticker_info.get("open", "N/A"),
-        "Day High": ticker_info.get("dayHigh", "N/A"),
-        "Day Low": ticker_info.get("dayLow", "N/A"),
-        "Volume": ticker_info.get("volume", "N/A"),
-        "Market Cap": ticker_info.get("marketCap", "N/A")
-    }
-    st.table(pd.DataFrame(list(info_data.items()), columns=["Metric", "Value"]))
+    with col2:
+        st.subheader("Stock Overview")
+        # Fetch additional stock info
+        ticker_info = yf.Ticker(ticker).info
+        info_df = pd.DataFrame({
+            "Metric": ["Previous Close", "Open", "Day High", "Day Low", "Volume", "Market Cap"],
+            "Value": [ticker_info.get("previousClose", "N/A"), 
+                      ticker_info.get("open", "N/A"), 
+                      ticker_info.get("dayHigh", "N/A"), 
+                      ticker_info.get("dayLow", "N/A"), 
+                      ticker_info.get("volume", "N/A"), 
+                      ticker_info.get("marketCap", "N/A")]
+        })
+        st.table(info_df)
     
-    # Prepare data for forecasting
-    scaled_data, scaler = prepare_data(data)
+    # Forecast Section
+    st.markdown("---")
+    st.subheader("30-Day Forecast")
     
-    # Button to trigger forecast generation
-    if st.button("Generate 30-Day Forecast"):
-        forecast_prices = forecast_stock(scaled_data, model, scaler, forecast_days=30)
-        # Create a date range for forecast dates (business days)
-        last_date = data.index[-1]
-        forecast_dates = pd.date_range(start=last_date, periods=31, freq='B')[1:]
+    scaled_data, scaler = prepare_scaler_and_data(data)
+    if forecast_trigger:
+        forecast = forecast_prices(scaled_data, model, scaler)
+        forecast_dates = pd.date_range(start=data.index[-1], periods=31, freq='B')[1:]
         forecast_df = pd.DataFrame({
             "Date": forecast_dates,
-            "Predicted Close": forecast_prices.flatten()
+            "Predicted Close": forecast.flatten()
         })
-        st.subheader("30-Day Forecast")
         st.dataframe(forecast_df)
         
-        # Plot historical prices and forecasted prices together
-        st.subheader("Historical vs Forecasted Prices")
+        # Plot Historical & Forecasted Prices
         fig2 = go.Figure()
         fig2.add_trace(go.Scatter(x=data.index, y=data['Close'], mode='lines', name='Historical Prices'))
         fig2.add_trace(go.Scatter(x=forecast_df["Date"], y=forecast_df["Predicted Close"], mode='lines', name='Forecasted Prices'))
-        fig2.update_layout(title=f"{ticker} Historical and Forecasted Prices",
-                           xaxis_title="Date", yaxis_title="Price (USD)")
+        fig2.update_layout(title=f"{ticker} Historical & Forecasted Prices", xaxis_title="Date", yaxis_title="Price (USD)")
         st.plotly_chart(fig2, use_container_width=True)
+    else:
+        st.info("Click the button in the sidebar to generate the 30-day forecast.")
